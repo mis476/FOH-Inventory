@@ -1,0 +1,12 @@
+{
+  "name": "foh-inventory",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Whimsiland FOH crockery stock (Cafe + Barista) – Google Apps Script web app",
+  "scripts": {
+    "check": "node tests/check.js",
+    "pull": "clasp pull",
+    "push": "node tests/check.js && clasp push -f",
+    "live": "node tools/live.js"
+  }
+}

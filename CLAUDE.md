@@ -1,0 +1,26 @@
+# FOH Inventory – project guide for Claude Code
+
+Google Apps Script web app (sheet-bound) for Whimsiland FOH crockery stock, sections Cafe + Barista.
+Script ID in `.clasp.json`; code in `src/` (clasp rootDir). App text English, owner chat Hinglish.
+
+## Golden rule
+Stock is NEVER stored as a running number. Opening / Closing / Summary are always calculated
+(computeStock_) from ITEM_MASTER (Base Opening + Base Date) + TRANSACTIONS (ACTIVE rows only).
+
+## Sheet tabs
+ITEM_MASTER, TRANSACTIONS (ledger, rows never deleted – wrong entry = VOID with reason, PIN needed),
+STOCK_NOW (auto view), SUMMARY (B2:B4 filters, onEdit refresh), STAFF, SETTINGS (Manager PIN).
+
+## Rules
+* saveEntries is all-or-nothing, under ScriptLock, duplicate-safe via requestId; stock may never go negative.
+* Types offered: ADD / BREAKAGE / MISSING. ADJUST is legacy (old rows still read, new ones rejected).
+* Dates / IDs written as text ('yyyy-MM-dd') so there is no timezone mismatch. Keep appsscript.json timeZone Asia/Kolkata.
+* Do not change sheet headers (HEAD) – ensureSheet_ throws if they differ.
+* Browser gets only strings / numbers, never Date objects.
+
+## How to work with me (the owner, "MIS")
+1. Reply in Hinglish, simple words.
+2. Explain the plan first and WAIT for "ok" before editing files.
+3. Before saying "done": `npm run check` must pass.
+4. Release only when I say "deploy" / "live karo": I run `npm run live` on my PC.
+   Never `clasp deploy` without `-i`. Never `clasp pull` unless I ask.
