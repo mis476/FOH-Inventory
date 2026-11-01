@@ -20,6 +20,7 @@ STAFF, SETTINGS and STOCK_NOW are gone (Setup deletes them).
 * Every public api (getInitData, getStock, saveEntries, voidEntry, getSummary) takes the key as last arg and checks
   currentUser_ first. Menu functions call requireSheetUser_ (web app must not run them).
 * Entered By / Void By = logged-in user's name.
+* appsscript.json web app access = ANYONE (any Google account can open the link; ACCESS decides who gets in).
 
 ## Rules
 * saveEntries is all-or-nothing, under ScriptLock, duplicate-safe via requestId; stock may never go negative.
