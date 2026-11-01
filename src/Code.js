@@ -15,21 +15,21 @@ const CFG = {
   MAX_QTY: 10000,
   MAX_LINES: 60,
   MAX_SUMMARY_DAYS: 400,
-  DEFAULT_PIN: '1234',
   SH: {
     MASTER: 'ITEM_MASTER',
     TXN: 'TRANSACTIONS',
-    STOCK: 'STOCK_NOW',
     SUMMARY: 'SUMMARY',
-    STAFF: 'STAFF',
-    SETTINGS: 'SETTINGS'
-  }
+    ACCESS: 'ACCESS',              // who can open the app, which tabs / sections / entry types
+    EMP: 'Employee_Master'         // only read once by Setup to fill ACCESS
+  },
+  OLD_TABS: ['STAFF', 'SETTINGS', 'STOCK_NOW'],   // replaced by ACCESS / the app; Setup deletes them
+  ENTRY_TYPES: ['ADD', 'BREAKAGE']                // types the app still offers
 };
 
 const TYPES = {
   ADD:      { label: 'Add',       sign: +1 },
   BREAKAGE: { label: 'Breakage',  sign: -1 },
-  MISSING:  { label: 'Missing',   sign: -1 },
+  MISSING:  { label: 'Missing',   sign: -1 },  // legacy: no longer offered (old rows are still counted)
   ADJUST:   { label: 'Adjust',    sign: 0 }   // legacy: no longer offered in the app (old rows are still read correctly)
 };
 
@@ -37,12 +37,17 @@ const HEAD = {
   MASTER: ['Item ID', 'Item Name', 'Category', 'Section', 'Base Opening', 'Base Date', 'Active', 'Remark'],
   TXN: ['Txn ID', 'Timestamp', 'Date', 'Section', 'Item ID', 'Item Name', 'Category', 'Type', 'Qty',
         'Signed Qty', 'Remark', 'Entered By', 'Request ID', 'Status', 'Void Reason', 'Void At', 'Void By'],
-  STOCK: ['Item ID', 'Item Name', 'Category', 'Section', 'Opening (Today)', 'Added', 'Breakage',
-          'Missing', 'Adjust', 'Current Stock', 'Updated At'],
-  STAFF: ['Staff Name', 'Active'],
+  ACCESS: ['Name', 'Email', 'Active', 'Section', 'Stock Tab', 'Summary Tab', 'Entries Tab',
+           'Add', 'Breakage', 'Void', 'Personal Link'],
   SUM_ITEMS: ['Item ID', 'Item Name', 'Category', 'Section', 'Opening', 'Added', 'Breakage',
               'Missing', 'Adjust', 'Closing'],
   SUM_ENTRIES: ['Date', 'Time', 'Txn ID', 'Section', 'Item', 'Type', 'Qty', 'Remark', 'Entered By', 'Status']
+};
+
+// ACCESS column numbers (1-based)
+const AC = {
+  NAME: 1, EMAIL: 2, ACTIVE: 3, SECTION: 4, TAB_STOCK: 5, TAB_SUMMARY: 6, TAB_ENTRIES: 7,
+  ADD: 8, BREAKAGE: 9, VOID: 10, LINK: 11
 };
 
 // TRANSACTIONS column numbers (1-based)
@@ -55,30 +60,43 @@ const TC = {
  * WEB APP
  * ===================================================== */
 
-function doGet() {
+/** Sirf ACCESS sheet wale log app khol sakte hain (email se, ya gmail wale apne personal link ?k= se) */
+function doGet(e) {
+  const key = (e && e.parameter && e.parameter.k) || '';
+  let user = null, why = '';
+  try { user = currentUser_(key); } catch (err) { why = err.message; }
+  if (!user) {
+    return HtmlService.createHtmlOutput(
+      '<div style="font-family:sans-serif;max-width:460px;margin:12vh auto;padding:24px;text-align:center">' +
+      '<h2>Access denied</h2><p style="color:#555">' + escHtml_(why) + '</p></div>')
+      .setTitle('FOH Stock')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  }
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('FOH Stock')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 
-/** App load par: date, sections, staff, warnings */
-function getInitData() {
+/** App load par: date, logged-in user + permissions, warnings */
+function getInitData(k) {
+  const user = currentUser_(k);
   const master = readItems_();
   return {
     today: today_(),
     monthStart: today_().slice(0, 8) + '01',
-    sections: CFG.SECTIONS.slice(),
-    staff: readStaff_(),
-    warnings: master.warnings,
-    noSectionCount: master.items.filter(function (it) { return it.active && !it.section; }).length,
-    defaultPin: getSetting_('Manager PIN') === CFG.DEFAULT_PIN
+    sections: user.sections.slice(),
+    user: publicUser_(user),
+    warnings: user.canVoid ? master.warnings : [],
+    noSectionCount: user.canVoid ? master.items.filter(function (it) { return it.active && !it.section; }).length : 0
   };
 }
 
 /** Ek section ka aaj ka live stock */
-function getStock(section) {
+function getStock(section, k) {
+  const user = currentUser_(k);
   section = normSection_(section);
   if (!section) throw new Error('Invalid section.');
+  requireSection_(user, section);
   const master = readItems_();
   const tx = readTxns_();
   const today = today_();
@@ -100,26 +118,33 @@ function getStock(section) {
 }
 
 /**
- * Entries save (single ya multiple).
- * payload = { requestId, section, enteredBy, pin?, lines:[{itemId, type, qty, remark}] }
+ * Entries save (single ya multiple). Entered By = logged-in user (ACCESS sheet).
+ * payload = { requestId, section, lines:[{itemId, type, qty, remark}] }
  * All-or-nothing: if even one line is invalid, nothing is saved.
  */
-function saveEntries(payload) {
+function saveEntries(payload, k) {
+  const user = currentUser_(k);
   const p = payload || {};
   const reqId = cleanReqId_(p.requestId);
   const section = normSection_(p.section);
-  const by = cleanText_(p.enteredBy);
+  const by = user.name;
   const lines = Array.isArray(p.lines) ? p.lines : [];
 
   if (!reqId) throw new Error('Request ID is missing. Refresh the page and try again.');
   if (!section) throw new Error('Select a section (Cafe / Barista).');
+  requireSection_(user, section);
   if (!lines.length) throw new Error('The list is empty. Add at least one entry.');
   if (lines.length > CFG.MAX_LINES) throw new Error('You can save at most ' + CFG.MAX_LINES + ' entries at a time.');
-  assertStaff_(by);
 
-  if (lines.some(function (l) { return String(l && l.type).toUpperCase() === 'ADJUST'; })) {
-    throw new Error('Adjust (physical count) entries are not available in this app. Use Add, Breakage or Missing.');
-  }
+  lines.forEach(function (l, i) {
+    const type = String(l && l.type || '').toUpperCase();
+    if (CFG.ENTRY_TYPES.indexOf(type) < 0) {
+      throw new Error('Entry ' + (i + 1) + ': only ' + CFG.ENTRY_TYPES.map(function (t) { return TYPES[t].label; }).join(' / ') + ' entries can be made.');
+    }
+    if (user.types.indexOf(type) < 0) {
+      throw new Error('Entry ' + (i + 1) + ': you are not allowed to make ' + TYPES[type].label + ' entries.');
+    }
+  });
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(25000)) throw new Error('Another entry is being saved right now. Wait 10 seconds and press Save again.');
@@ -195,23 +220,22 @@ function saveEntries(payload) {
     lock.releaseLock();
   }
 
-  safeRefreshStockNow_();
-  return { ok: true, duplicate: duplicate, txnIds: saved, stock: getStock(section) };
+  return { ok: true, duplicate: duplicate, txnIds: saved, stock: getStock(section, k) };
 }
 
 /**
- * A wrong entry is VOIDed (never deleted). PIN required.
- * payload = { txnId, reason, enteredBy, pin }
+ * A wrong entry is VOIDed (never deleted). Only users with Void = Y in ACCESS.
+ * payload = { txnId, reason }
  */
-function voidEntry(payload) {
+function voidEntry(payload, k) {
+  const user = currentUser_(k);
+  if (!user.canVoid) throw new Error('You are not allowed to void entries.');
   const p = payload || {};
   const txnId = String(p.txnId || '').trim();
   const reason = cleanText_(p.reason).slice(0, 300);
-  const by = cleanText_(p.enteredBy);
+  const by = user.name;
   if (!txnId) throw new Error('Txn ID missing.');
   if (reason.length < 3) throw new Error('Enter a reason for the void (at least 3 characters).');
-  assertStaff_(by);
-  checkPin_(p.pin);
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(25000)) throw new Error('Another entry is being saved right now. Try again in a moment.');
@@ -223,6 +247,7 @@ function voidEntry(payload) {
     if (target.length !== 1) throw new Error('Txn ' + txnId + ' was not found (or is duplicated). Run the Health Check.');
     const t = target[0];
     if (t.status !== 'ACTIVE') throw new Error(txnId + ' is already VOID.');
+    if (user.sections.indexOf(t.section) < 0) throw new Error('This entry belongs to ' + t.section + ', which you do not have access to.');
 
     const master = readItems_();
     const it = mapById_(master.items)[t.itemId];
@@ -249,7 +274,6 @@ function voidEntry(payload) {
     lock.releaseLock();
   }
 
-  safeRefreshStockNow_();
   return { ok: true, txnId: txnId, section: section };
 }
 
@@ -257,7 +281,9 @@ function voidEntry(payload) {
  * Summary: item-wise + entries list
  * p = { from:'yyyy-MM-dd', to:'yyyy-MM-dd', section:'All'|'Cafe'|'Barista' }
  */
-function getSummary(p) {
+function getSummary(p, k) {
+  const user = currentUser_(k);
+  if (!user.tabs.summary && !user.tabs.entries) throw new Error('You do not have access to the Summary / Entries.');
   p = p || {};
   const from = normDate_(p.from);
   const to = normDate_(p.to);
@@ -265,9 +291,11 @@ function getSummary(p) {
   if (from > to) throw new Error('The From date must be on or before the To date.');
   const days = (toDateObj_(to) - toDateObj_(from)) / 86400000;
   if (days > CFG.MAX_SUMMARY_DAYS) throw new Error('A summary can cover at most ' + CFG.MAX_SUMMARY_DAYS + ' days at a time.');
-  const secAll = !p.section || String(p.section).toLowerCase() === 'all';
-  const section = secAll ? '' : normSection_(p.section);
+  let secAll = !p.section || String(p.section).toLowerCase() === 'all';
+  let section = secAll ? '' : normSection_(p.section);
   if (!secAll && !section) throw new Error('Invalid section.');
+  if (section) requireSection_(user, section, true);
+  else if (user.sections.length < CFG.SECTIONS.length) { section = user.sections[0]; secAll = false; }   // only one section allowed
 
   const res = buildSummary_(from, to, section);
   return {
@@ -363,35 +391,15 @@ function buildSummary_(from, to, section) {
 }
 
 /* =====================================================
- * SHEET VIEWS: STOCK_NOW + SUMMARY
+ * SHEET VIEW: SUMMARY
  * ===================================================== */
 
-function refreshStockNow() {
-  const sh = getSheet_(CFG.SH.STOCK);
-  const master = readItems_();
-  const tx = readTxns_();
-  const today = today_();
-  const calc = computeStock_(master.items, tx.rows, today, today);
-  const stamp = nowStr_('yyyy-MM-dd HH:mm:ss');
-
-  const rows = master.items
-    .filter(function (it) { return it.active && it.baseDate <= today; })
-    .sort(function (a, b) { return (a.section || 'zz').localeCompare(b.section || 'zz') || sortItems_(a, b); })
-    .map(function (it) {
-      const c = calc[it.id];
-      return [it.id, it.name, it.category, it.section || '(no section)', c.opening, c.added,
-              c.breakage, c.missing, c.adjust, c.closing, stamp];
-    });
-
-  const last = sh.getLastRow();
-  if (last > 1) sh.getRange(2, 1, last - 1, HEAD.STOCK.length).clearContent();
-  if (rows.length) {
-    ensureRows_(sh, rows.length + 1);
-    sh.getRange(2, 1, rows.length, HEAD.STOCK.length).setValues(rows);
-  }
+function refreshSummarySheet() {
+  requireSheetUser_();
+  refreshSummary_();
 }
 
-function refreshSummarySheet() {
+function refreshSummary_() {
   const sh = getSheet_(CFG.SH.SUMMARY);
   const from = normDate_(sh.getRange('B2').getValue());
   const to = normDate_(sh.getRange('B3').getValue());
@@ -433,8 +441,8 @@ function refreshSummarySheet() {
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('FOH Stock')
-    .addItem('Refresh Stock Now', 'refreshStockNow')
     .addItem('Refresh Summary', 'refreshSummarySheet')
+    .addItem('Make personal links (gmail users)', 'makePersonalLinks')
     .addSeparator()
     .addItem('Fill missing Item IDs', 'fillMissingItemIds')
     .addItem('Go-Live: Base Date = Today', 'goLiveSetBaseDateToday')
@@ -451,19 +459,18 @@ function onEdit(e) {
     const sh = e.range.getSheet();
     if (sh.getName() !== CFG.SH.SUMMARY) return;
     const r = e.range.getRow(), c = e.range.getColumn();
-    if (c === 2 && r >= 2 && r <= 4) refreshSummarySheet();
+    if (c === 2 && r >= 2 && r <= 4) refreshSummary_();
   } catch (err) {
     // simple trigger: chupchaap fail na ho, message dikhao
     try { e.range.getSheet().getRange('D2').setValue('Error: ' + err.message); } catch (x) {}
   }
 }
 
-function installTriggers_() {
+/** STOCK_NOW is gone: remove its old daily trigger */
+function removeOldTriggers_() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'refreshStockNow') ScriptApp.deleteTrigger(t);
   });
-  // After midnight, refresh STOCK_NOW with the new day's opening
-  ScriptApp.newTrigger('refreshStockNow').timeBased().everyDays(1).atHour(0).nearMinute(5).create();
 }
 
 /* =====================================================
@@ -471,6 +478,7 @@ function installTriggers_() {
  * ===================================================== */
 
 function setupSheet() {
+  requireSheetUser_();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) throw new Error('This script must be run from inside the new Google Sheet (Extensions → Apps Script).');
   PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
@@ -478,9 +486,7 @@ function setupSheet() {
 
   const master = ensureSheet_(ss, CFG.SH.MASTER, HEAD.MASTER);
   const txn = ensureSheet_(ss, CFG.SH.TXN, HEAD.TXN);
-  const stock = ensureSheet_(ss, CFG.SH.STOCK, HEAD.STOCK);
-  const staff = ensureSheet_(ss, CFG.SH.STAFF, HEAD.STAFF);
-  ensureSettings_(ss);
+  const access = ensureSheet_(ss, CFG.SH.ACCESS, HEAD.ACCESS);
   ensureSummary_(ss);
 
   // Text formats (dates/IDs stay text → no timezone mismatch)
@@ -496,15 +502,15 @@ function setupSheet() {
     .requireValueInList(['Y', 'N'], true).setAllowInvalid(false).build());
   master.getRange('E2:E').setDataValidation(SpreadsheetApp.newDataValidation()
     .requireNumberGreaterThanOrEqualTo(0).setAllowInvalid(false).build());
-  staff.getRange('B2:B').setDataValidation(SpreadsheetApp.newDataValidation()
-    .requireValueInList(['Y', 'N'], true).setAllowInvalid(false).build());
+  const yn = SpreadsheetApp.newDataValidation().requireValueInList(['Y', 'N'], true).setAllowInvalid(false).build();
+  access.getRange(2, AC.ACTIVE, access.getMaxRows() - 1, 1).setDataValidation(yn);
+  access.getRange(2, AC.TAB_STOCK, access.getMaxRows() - 1, AC.VOID - AC.TAB_STOCK + 1).setDataValidation(yn);
+  access.getRange(2, AC.SECTION, access.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Both'].concat(CFG.SECTIONS), true).setAllowInvalid(false).build());
 
   // TRANSACTIONS pe warning protection (galti se edit na ho)
   if (!txn.getProtections(SpreadsheetApp.ProtectionType.SHEET).length) {
     txn.protect().setDescription('Ledger: entries only through the app. Do not edit manually.').setWarningOnly(true);
-  }
-  if (!stock.getProtections(SpreadsheetApp.ProtectionType.SHEET).length) {
-    stock.protect().setDescription('Auto-generated view').setWarningOnly(true);
   }
 
   // Default blank "Sheet1" hatao
@@ -515,14 +521,20 @@ function setupSheet() {
 
   let imported = 0;
   if (master.getLastRow() < 2) imported = importFromOldSheet_(master);
-  if (staff.getLastRow() < 2) staff.getRange(2, 1, 1, 2).setValues([['Staff 1', 'Y']]);
+  const users = access.getLastRow() < 2 ? fillAccessFromEmployees_(ss, access) : 0;
 
-  installTriggers_();
-  refreshStockNow();
-  refreshSummarySheet();
+  // Old tabs are replaced by ACCESS (STAFF, SETTINGS) and by the app's live stock (STOCK_NOW)
+  const deleted = [];
+  CFG.OLD_TABS.forEach(function (n) {
+    const s = ss.getSheetByName(n);
+    if (s && ss.getSheets().length > 1) { ss.deleteSheet(s); deleted.push(n); }
+  });
+  removeOldTriggers_();
+  refreshSummary_();
 
-  const msg = 'Setup done. Items imported: ' + imported +
-    '. Next: fill Section (Cafe/Barista) in ITEM_MASTER, add names in STAFF, and change the PIN in SETTINGS.';
+  const msg = 'Setup done. Items imported: ' + imported + ', users added to ACCESS: ' + users +
+    (deleted.length ? ', deleted tabs: ' + deleted.join(', ') : '') +
+    '. Next: check ACCESS, then menu → Make personal links (gmail users).';
   Logger.log(msg);
   try { ss.toast(msg, 'FOH Stock', 10); } catch (e) {}
   return msg;
@@ -550,8 +562,91 @@ function importFromOldSheet_(master) {
   return out.length;
 }
 
+/**
+ * First fill of ACCESS from Employee_Master (headers: Name, Department..., Email...).
+ * OPERATIONS MANAGER = everything, STORE = Add, SERVICE = Breakage. Other departments: add by hand.
+ */
+function fillAccessFromEmployees_(ss, access) {
+  const emp = ss.getSheetByName(CFG.SH.EMP);
+  if (!emp || emp.getLastRow() < 2) return 0;
+  const v = emp.getDataRange().getValues();
+  const head = v[0].map(function (h) { return String(h).trim().toLowerCase(); });
+  const col = function (word) { return head.findIndex(function (h) { return h.indexOf(word) >= 0; }); };
+  const cName = head.indexOf('name') >= 0 ? head.indexOf('name') : col('name');
+  const cDept = col('department');
+  const cMail = col('email');
+  if (cName < 0 || cDept < 0 || cMail < 0) return 0;
+
+  const out = [];
+  v.slice(1).forEach(function (r) {
+    const name = cleanText_(r[cName]);
+    const email = normEmail_(r[cMail]);
+    const dept = String(r[cDept]).toUpperCase();
+    if (!name || !email) return;
+    //                      Stock Summary Entries Add  Breakage Void
+    let p = null;
+    if (dept.indexOf('OPERATIONS MANAGER') >= 0) p = ['Y', 'Y', 'Y', 'Y', 'Y', 'Y'];
+    else if (dept.indexOf('STORE') >= 0) p = ['Y', 'N', 'N', 'Y', 'N', 'N'];
+    else if (dept.indexOf('SERVICE') >= 0) p = ['Y', 'N', 'N', 'N', 'Y', 'N'];
+    if (p) out.push([name, email, 'Y', 'Both'].concat(p, ['']));
+  });
+  if (out.length) {
+    ensureRows_(access, out.length + 1);
+    access.getRange(2, 1, out.length, HEAD.ACCESS.length).setValues(out);
+  }
+  return out.length;
+}
+
+/**
+ * Gmail (non-company) users cannot be detected by Google in this web app, so each gets a
+ * personal link ?k=<key>. Key → email lives in Script Properties. Clear a Personal Link cell
+ * and run again to make a new link (the old one stops working).
+ */
+function makePersonalLinks() {
+  requireSheetUser_();
+  const url = ScriptApp.getService().getUrl();
+  if (!url) { uiAlert_('Deploy the web app first (Deploy → New deployment → Web app), then run this again.'); return; }
+  const sh = getSheet_(CFG.SH.ACCESS);
+  const last = sh.getLastRow();
+  if (last < 2) { uiAlert_('ACCESS is empty.'); return; }
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  const rng = sh.getRange(2, AC.EMAIL, last - 1, AC.LINK - AC.EMAIL + 1);
+  const v = rng.getValues();
+  const domain = ownerDomain_();
+  let made = 0;
+  const wanted = {}, wantedEmail = {};
+  v.forEach(function (r) {
+    const email = normEmail_(r[0]);
+    const active = String(r[AC.ACTIVE - AC.EMAIL]).trim().toUpperCase() !== 'N';
+    const li = AC.LINK - AC.EMAIL;
+    if (!email || !active || (domain && email.split('@')[1] === domain)) { r[li] = ''; return; }
+    let key = all['E_' + email] || '';
+    if (!key || !String(r[li]).trim()) {            // new user, or link cell cleared → new key
+      if (key) props.deleteProperty('K_' + key);
+      key = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+      props.setProperty('K_' + key, email);
+      props.setProperty('E_' + email, key);
+      made++;
+    }
+    wanted[key] = true;
+    wantedEmail[email] = true;
+    r[li] = url + '?k=' + key;
+  });
+  // keys of removed / inactive users stop working
+  Object.keys(all).forEach(function (p) {
+    if (p.indexOf('K_') === 0 && !wanted[p.slice(2)]) props.deleteProperty(p);
+    if (p.indexOf('E_') === 0 && !wantedEmail[p.slice(2)]) props.deleteProperty(p);
+  });
+  sh.getRange(2, AC.LINK, last - 1, 1).setValues(v.map(function (r) { return [r[AC.LINK - AC.EMAIL]]; }));
+  uiAlert_('Done. New links: ' + made + '.\nSend each gmail user ONLY their own link (WhatsApp). ' +
+    'Company (@' + domain + ') users just open the normal app link.' +
+    (/\/dev$/.test(url) ? '\n\nWarning: the link ends with /dev. Run npm run live first.' : ''));
+}
+
 /** Write a new item in ITEM_MASTER (name/category/section only) → this fills ID, Base Date, Base 0, Active Y */
 function fillMissingItemIds() {
+  requireSheetUser_();
   const sh = getSheet_(CFG.SH.MASTER);
   const last = sh.getLastRow();
   if (last < 2) return;
@@ -577,10 +672,11 @@ function fillMissingItemIds() {
  * then run this. It only runs while there is no ACTIVE entry.
  */
 function goLiveSetBaseDateToday() {
+  requireSheetUser_();
   const ui = SpreadsheetApp.getUi();
   const tx = readTxns_();
   if (tx.rows.some(function (r) { return r.status === 'ACTIVE'; })) {
-    ui.alert('Entries already exist. Do not change the base date now; correct any difference with Add, Breakage or Missing entries in the app.');
+    ui.alert('Entries already exist. Do not change the base date now; correct any difference with Add or Breakage entries in the app.');
     return;
   }
   const ok = ui.alert('Set the Base Date of all items to today (' + today_() + ')?\n' +
@@ -592,18 +688,19 @@ function goLiveSetBaseDateToday() {
   const rng = sh.getRange(2, 6, last - 1, 1);
   const ids = sh.getRange(2, 1, last - 1, 1).getValues();
   rng.setValues(ids.map(function (r) { return [String(r[0]).trim() ? today_() : '']; }));
-  refreshStockNow();
   ui.alert('Base Date set. The app is now live.');
 }
 
 /** Pura data check: koi bhi gadbad ho to list dikhata hai */
 function healthCheck() {
+  requireSheetUser_();
   const issues = [];
   let master;
   try { master = readItems_(); } catch (e) { uiAlert_('ITEM_MASTER error: ' + e.message); return; }
   master.warnings.forEach(function (w) { issues.push(w); });
   const noSec = master.items.filter(function (it) { return it.active && !it.section; }).length;
   if (noSec) issues.push(noSec + ' active items have no Section (they will not show in the app).');
+  try { readAccess_().warnings.forEach(function (w) { issues.push(w); }); } catch (e) { issues.push(e.message); }
 
   const map = mapById_(master.items);
   const tx = readTxns_();
@@ -703,35 +800,93 @@ function readTxns_() {
   return { sh: sh, rows: rows };
 }
 
-function readStaff_() {
-  const sh = getSheet_(CFG.SH.STAFF);
+/** ACCESS sheet → { users:[...], warnings:[...] }. Flags must be "Y"; Section blank = Both. */
+function readAccess_() {
+  const sh = getSheet_(CFG.SH.ACCESS);
   const last = sh.getLastRow();
-  if (last < 2) return [];
-  return sh.getRange(2, 1, last - 1, 2).getValues()
-    .filter(function (r) { return cleanText_(r[0]) && String(r[1]).trim().toUpperCase() !== 'N'; })
-    .map(function (r) { return cleanText_(r[0]); });
+  const users = [];
+  const warnings = [];
+  const seen = {};
+  if (last < 2) return { users: users, warnings: ['ACCESS is empty: nobody can open the app.'] };
+  const y = function (x) { return String(x).trim().toUpperCase() === 'Y'; };
+  sh.getRange(2, 1, last - 1, HEAD.ACCESS.length).getValues().forEach(function (r, i) {
+    const row = i + 2;
+    const name = cleanText_(r[AC.NAME - 1]);
+    const email = normEmail_(r[AC.EMAIL - 1]);
+    if (!name && !String(r[AC.EMAIL - 1]).trim()) return;
+    if (!name || !email) { warnings.push('ACCESS row ' + row + ': Name or a valid Email is missing.'); return; }
+    if (seen[email]) { warnings.push('ACCESS row ' + row + ': ' + email + ' is already in row ' + seen[email] + ' (only the first row counts).'); return; }
+    seen[email] = row;
+    const secRaw = String(r[AC.SECTION - 1]).trim();
+    const sections = (!secRaw || secRaw.toLowerCase() === 'both') ? CFG.SECTIONS.slice() : [normSection_(secRaw)].filter(String);
+    if (!sections.length) warnings.push('ACCESS row ' + row + ' (' + name + '): Section must be Cafe, Barista or Both.');
+    const types = [];
+    if (y(r[AC.ADD - 1])) types.push('ADD');
+    if (y(r[AC.BREAKAGE - 1])) types.push('BREAKAGE');
+    users.push({
+      name: name, email: email, row: row,
+      active: String(r[AC.ACTIVE - 1]).trim().toUpperCase() !== 'N',
+      sections: sections,
+      tabs: { stock: y(r[AC.TAB_STOCK - 1]), summary: y(r[AC.TAB_SUMMARY - 1]), entries: y(r[AC.TAB_ENTRIES - 1]) },
+      types: types,
+      canVoid: y(r[AC.VOID - 1])
+    });
+  });
+  return { users: users, warnings: warnings };
 }
 
 /* =====================================================
  * SECURITY
  * ===================================================== */
 
-function checkPin_(pin) {
-  const cache = CacheService.getScriptCache();
-  const fails = Number(cache.get('PIN_FAILS') || 0);
-  if (fails >= 5) throw new Error('Wrong PIN 5 times. Try again after 15 minutes.');
-  const real = String(getSetting_('Manager PIN') || '').trim();
-  if (!real) throw new Error('The Manager PIN is not set in SETTINGS.');
-  if (String(pin || '').trim() !== real) {
-    cache.put('PIN_FAILS', String(fails + 1), 900);
-    throw new Error('The Manager PIN is wrong.');
+/**
+ * Who is using the app? Company accounts: Google gives the email directly.
+ * Gmail accounts: Google hides the email (web app runs as the owner), so they use a personal link key.
+ */
+function currentUser_(k) {
+  const users = readAccess_().users;
+  const find = function (email) { return email ? users.filter(function (u) { return u.email === email; })[0] : null; };
+  const me = normEmail_(Session.getActiveUser().getEmail());
+  let u = find(me);
+  if (!u && me && me === normEmail_(Session.getEffectiveUser().getEmail())) {
+    // the owner (mis@) can never lock himself out
+    u = { name: 'MIS', email: me, active: true, sections: CFG.SECTIONS.slice(),
+          tabs: { stock: true, summary: true, entries: true }, types: CFG.ENTRY_TYPES.slice(), canVoid: true };
   }
-  cache.remove('PIN_FAILS');
+  if (!u) {
+    const key = String(k || '').trim();
+    if (/^[A-Za-z0-9]{20,64}$/.test(key)) u = find(PropertiesService.getScriptProperties().getProperty('K_' + key));
+  }
+  if (!u) throw new Error('You are not in the FOH Stock ACCESS list. Ask the manager to add your email (gmail users need their personal link).');
+  if (!u.active) throw new Error('Your access to FOH Stock is switched off (ACCESS → Active = N).');
+  if (!u.sections.length) throw new Error('No section (Cafe / Barista) is set for you in ACCESS.');
+  if (!u.tabs.stock && !u.tabs.summary && !u.tabs.entries) throw new Error('No tab is switched on for you in ACCESS.');
+  return u;
 }
 
-function assertStaff_(name) {
-  if (!name) throw new Error('Select who is making the entry.');
-  if (readStaff_().indexOf(name) < 0) throw new Error('\"' + name + '\" is not an active name in the STAFF list.');
+/** Only what the browser needs */
+function publicUser_(u) {
+  return { name: u.name, email: u.email, sections: u.sections, tabs: u.tabs, types: u.types, canVoid: u.canVoid };
+}
+
+function requireSection_(user, section, forSummary) {
+  if (user.sections.indexOf(section) < 0) throw new Error('You do not have access to ' + section + '.');
+  if (!forSummary && !user.tabs.stock) throw new Error('You do not have access to the Stock tab.');
+}
+
+/**
+ * Menu functions are public functions, so the web app could call them too.
+ * They may only run from the sheet itself (active user = the one running the script).
+ */
+function requireSheetUser_() {
+  const me = normEmail_(Session.getActiveUser().getEmail());
+  const eff = normEmail_(Session.getEffectiveUser().getEmail());
+  if (!me || me !== eff) throw new Error('This can only be run from the FOH Stock sheet menu.');
+}
+
+function ownerDomain_() {
+  const e = normEmail_(Session.getEffectiveUser().getEmail());
+  return e ? e.split('@')[1] : '';
 }
 
 /* =====================================================
@@ -767,17 +922,6 @@ function ensureSheet_(ss, name, headers) {
   return sh;
 }
 
-function ensureSettings_(ss) {
-  let sh = ss.getSheetByName(CFG.SH.SETTINGS);
-  if (!sh) sh = ss.insertSheet(CFG.SH.SETTINGS);
-  if (!String(sh.getRange('A1').getValue()).trim()) {
-    sh.getRange('A1:B2').setValues([['Setting', 'Value'], ['Manager PIN', CFG.DEFAULT_PIN]]);
-    sh.getRange('B2').setNumberFormat('@');
-    sh.getRange('A1:B1').setFontWeight('bold');
-  }
-  return sh;
-}
-
 function ensureSummary_(ss) {
   let sh = ss.getSheetByName(CFG.SH.SUMMARY);
   if (!sh) sh = ss.insertSheet(CFG.SH.SUMMARY);
@@ -799,15 +943,6 @@ function ensureSummary_(ss) {
     sh.setFrozenRows(7);
   }
   return sh;
-}
-
-function getSetting_(key) {
-  const sh = getSheet_(CFG.SH.SETTINGS);
-  const last = sh.getLastRow();
-  if (last < 2) return '';
-  const v = sh.getRange(2, 1, last - 1, 2).getValues();
-  for (let i = 0; i < v.length; i++) if (String(v[i][0]).trim() === key) return String(v[i][1]).trim();
-  return '';
 }
 
 function appendTxnRows_(sh, rows) {
@@ -837,6 +972,8 @@ function nowStr_(fmt) { return Utilities.formatDate(new Date(), tz_(), fmt); }
 function pad_(n, w) { return String(n).padStart(w, '0'); }
 
 function cleanText_(s) { return String(s === null || s === undefined ? '' : s).replace(/\s+/g, ' ').trim(); }
+function normEmail_(s) { const x = String(s || '').trim().toLowerCase(); return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x) ? x : ''; }
+function escHtml_(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 function cleanReqId_(s) { const x = String(s || '').trim(); return /^[A-Za-z0-9-]{8,64}$/.test(x) ? x : ''; }
 
 function toInt_(v) {
@@ -885,10 +1022,6 @@ function maxTxnSeq_(rows) {
 function sortItems_(a, b) {
   return String(a.category || '').localeCompare(String(b.category || '')) ||
          String(a.name).localeCompare(String(b.name));
-}
-
-function safeRefreshStockNow_() {
-  try { refreshStockNow(); } catch (e) { Logger.log('STOCK_NOW refresh failed: ' + e.message); }
 }
 
 function uiAlert_(msg) {

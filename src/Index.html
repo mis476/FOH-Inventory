@@ -39,8 +39,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .brand small{display:block;color:#C9C3E6;font-size:12.5px;font-weight:600}
 .clock{font-family:var(--display);font-size:19px;color:var(--sun);white-space:nowrap}
 .staff{display:flex;align-items:center;gap:8px;font-size:13px;color:#C9C3E6;white-space:nowrap}
-.staff select{background:#2E2853;border:1px solid #463F70;color:#fff;border-radius:10px;padding:7px 10px;min-width:170px}
-.staff.need select{border-color:var(--gum);box-shadow:0 0 0 3px rgba(255,92,138,.35)}
+.staff b{color:#fff;font-family:var(--display);font-weight:600;font-size:14px}
 .loadinfo{display:flex;flex-direction:column;align-items:flex-end;line-height:1.25;font-size:12.5px;font-weight:700;color:#C9C3E6;white-space:nowrap}
 .loadinfo b{color:#fff;font-family:var(--display);font-weight:600;font-size:14px}
 .loadinfo .li-main{display:flex;align-items:center;gap:6px}
@@ -225,15 +224,13 @@ body::before{content:"";position:fixed;inset:0;z-index:-2;background:url('data:i
     <span class="li-main"><i class="spin xs" id="liSpin" style="display:none"></i><span id="liLab">Starting…</span><b id="liVal"></b></span>
     <span id="liSub"></span>
   </div>
-  <button class="btn sunny sm hbtn" id="btnHdrRefresh" title="Reload everything: staff list, stock and summary"><span class="ric">⟳</span> Refresh</button>
+  <button class="btn sunny sm hbtn" id="btnHdrRefresh" title="Reload everything: your access, stock and summary"><span class="ric">⟳</span> Refresh</button>
   <div class="clock num" id="clock"></div>
-  <div class="staff" id="staffWrap"><span>Entry by</span>
-    <select id="staffSel" aria-label="Who is making the entries"><option value="">Select</option></select>
-  </div>
+  <div class="staff" title="Logged in"><span>👤</span><b id="userName"></b></div>
 </header>
 
 <nav class="tabs" role="tablist">
-  <button class="tab active" data-view="stock">🍽️ Stock &amp; entry</button>
+  <button class="tab" data-view="stock">🍽️ Stock &amp; entry</button>
   <button class="tab" data-view="sum">📊 Summary</button>
   <button class="tab" data-view="ent">🧾 Entries</button>
 </nav>
@@ -245,7 +242,7 @@ body::before{content:"";position:fixed;inset:0;z-index:-2;background:url('data:i
   <!-- STOCK & ENTRY -->
   <section id="v-stock" class="view">
     <div class="card hero">
-      <h2>Which section is this entry for?</h2>
+      <h2 id="secTitle">Which section is this entry for?</h2>
       <div class="seg" id="secSeg">
         <button type="button" data-sec="Cafe" class="on">☕ Cafe</button>
         <button type="button" data-sec="Barista">🧋 Barista</button>
@@ -288,9 +285,10 @@ body::before{content:"";position:fixed;inset:0;z-index:-2;background:url('data:i
 const TYPES = {
   ADD:      { label: 'Add',      hint: 'New stock received',   sign: +1, c: 'var(--grass)' },
   BREAKAGE: { label: 'Breakage', hint: 'Broken or chipped',    sign: -1, c: 'var(--red)' },
-  MISSING:  { label: 'Missing',  hint: 'Lost or not found',    sign: -1, c: 'var(--amber)' }
+  MISSING:  { label: 'Missing',  hint: 'Old entries only',     sign: -1, c: 'var(--amber)' }   // no longer offered
 };
-const S = { init: null, section: 'Cafe', stock: null, cart: [], reqId: null, cat: 'All', q: '', open: null, ed: null,
+const VIEWS = { stock: 'stock', sum: 'summary', ent: 'entries' };   // view → ACCESS tab flag
+const S = { init: null, key: '', section: 'Cafe', stock: null, cart: [], reqId: null, cat: 'All', q: '', open: null, ed: null,
             view: 'stock', busy: false, staff: '', sum: null, f: null, onlyMoved: false, sumQ: '', entQ: '', modalLock: false,
             pending: 0, refreshing: false, load: { start: 0, ms: null, at: null, failed: false } };
 const $ = (s, el) => (el || document).querySelector(s);
@@ -300,7 +298,7 @@ function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '
 function call(fn, ...args){
   return new Promise((res, rej) => {
     google.script.run.withSuccessHandler(res)
-      .withFailureHandler(e => rej(new Error((e && e.message) ? e.message : String(e))))[fn](...args);
+      .withFailureHandler(e => rej(new Error((e && e.message) ? e.message : String(e))))[fn](...args, S.key);   // personal link key (gmail users)
   });
 }
 function errMsg(e){ return String((e && e.message) || e || 'Something went wrong').replace(/^(Error|Exception|ScriptError):\s*/i, ''); }
@@ -333,6 +331,14 @@ function busy(btn, on, label){
 function skeleton(){ return '<div class="card"><div class="sk" style="height:28px;width:40%"></div><div class="sk" style="height:16px;width:65%;margin-top:12px"></div><div class="sk" style="height:70px;margin-top:18px"></div></div>'; }
 function typeTag(t, extra){ const x = TYPES[t]; return '<span class="tag" style="--c:' + (x ? x.c : 'var(--grape)') + '">' + esc(x ? x.label : t) + (extra != null ? ' ' + esc(extra) : '') + '</span>'; }
 function itemById(id){ return (S.stock && S.stock.items || []).find(i => i.id === id); }
+function me(){ return (S.init && S.init.user) || { sections: [], tabs: {}, types: [], canVoid: false }; }
+function canView(v){ return !!me().tabs[VIEWS[v]]; }
+function urlKey(){
+  return new Promise(res => {
+    try { google.script.url.getLocation(l => res((l && l.parameter && l.parameter.k) || '')); }
+    catch (e) { res(''); }
+  });
+}
 
 /* ================= LOAD / REFRESH TIMER (header) ================= */
 /* Every server load goes through tracked(): the header shows a live "Loading… x s" while it runs,
@@ -392,16 +398,19 @@ window.addEventListener('load', boot);
 async function boot(){
   bindUI(); tick(); setInterval(tick, 1000);
   try {
+    S.key = await urlKey();
     await tracked(async () => {
       S.init = await call('getInitData');
       $('#bootBox').remove();
-      renderStaff(true); renderBanners();
-      S.f = { from: S.init.monthStart, to: S.init.today, sec: 'All' };
+      renderUser(); renderBanners();
+      const u = me();
+      S.f = { from: S.init.monthStart, to: S.init.today, sec: u.sections.length > 1 ? 'All' : u.sections[0] };
       renderFilters();
       const saved = store('foh_section');
-      setSection(saved === 'Barista' ? 'Barista' : 'Cafe', true);
-      showView('stock');
-      await fetchStock();
+      setSection(u.sections.indexOf(saved) >= 0 ? saved : u.sections[0], true);
+      const first = Object.keys(VIEWS).find(canView);
+      showView(first);
+      if (first === 'stock') await fetchStock();
     });
     setInterval(() => {
       if (S.view === 'stock' && !$('#modal').classList.contains('open') && !S.busy && !S.refreshing && !document.hidden && !S.open) loadStock(true);
@@ -417,7 +426,6 @@ function bindUI(){
   $$('#secSeg button').forEach(b => b.onclick = () => setSection(b.dataset.sec));
   $('#q').addEventListener('input', e => { S.q = e.target.value; renderStock(); });
   $('#btnHdrRefresh').onclick = refreshAll;
-  $('#staffSel').onchange = e => { S.staff = e.target.value; store('foh_staff', S.staff); markStaff(); };
   $('#ciBtn').onclick = () => openCart();
   $('#ciClear').onclick = () => confirmBox('Clear the list?', S.cart.length + ' unsaved ' + (S.cart.length === 1 ? 'entry' : 'entries') + ' will be removed.', 'Yes, clear', () => { S.cart = []; S.reqId = null; renderStock(); updateBar(); });
   $('#modal').addEventListener('click', e => { if (e.target.id === 'modal' && !S.modalLock) closeModal(); });
@@ -427,23 +435,24 @@ function tick(){
   $('#clock').textContent = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
   updateLoadInfo();
 }
-function renderStaff(first){
-  const sel = $('#staffSel'), list = (S.init && S.init.staff) || [];
-  const want = first ? store('foh_staff') : S.staff;
-  sel.innerHTML = '<option value="">Select</option>' + list.map(n => '<option' + (n === want ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
-  S.staff = list.indexOf(want) >= 0 ? want : '';
-  markStaff();
+/* Logged-in user (ACCESS sheet): name in the header, only the allowed tabs and sections */
+function renderUser(){
+  const u = me();
+  S.staff = u.name;
+  $('#userName').textContent = u.name + (u.sections.length === 1 ? ' · ' + u.sections[0] : '');
+  $$('.tab').forEach(t => { t.style.display = canView(t.dataset.view) ? '' : 'none'; });
+  $$('#secSeg button').forEach(b => { b.style.display = u.sections.indexOf(b.dataset.sec) >= 0 ? '' : 'none'; });
+  $('#secTitle').textContent = !u.types.length ? 'Stock (view only)'
+    : u.sections.length > 1 ? 'Which section is this entry for?' : u.sections[0] + ' stock';
 }
-function markStaff(){ $('#staffWrap').classList.toggle('need', !S.staff); }
 function renderBanners(){
   const i = S.init || {}, b = [];
-  if (!(i.staff || []).length) b.push('<div class="banner err">There is no active name in the STAFF tab. Add a name first, otherwise entries cannot be saved.</div>');
   if (i.noSectionCount) b.push('<div class="banner">' + i.noSectionCount + ' item(s) have no Section in ITEM_MASTER, so they are not shown in the app.</div>');
-  if (i.defaultPin) b.push('<div class="banner">The Manager PIN is still the default (1234). Change it in the SETTINGS tab.</div>');
   (i.warnings || []).slice(0, 5).forEach(w => b.push('<div class="banner">' + esc(w) + '</div>'));
   $('#banners').innerHTML = b.join('');
 }
 function showView(v){
+  if (!canView(v)) return;
   S.view = v;
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
   $$('.view').forEach(x => x.classList.toggle('active', x.id === 'v-' + v));
@@ -455,7 +464,7 @@ function showView(v){
 }
 
 /* ================= FULL REFRESH (header button) ================= */
-/* Reloads everything: staff list, warnings, stock of the current section and the summary.
+/* Reloads everything: your access, warnings, stock of the current section and the summary.
    An unsaved list is kept, and re-checked against the fresh stock. */
 async function refreshAll(){
   if (S.refreshing) return;
@@ -466,13 +475,15 @@ async function refreshAll(){
     await tracked(async () => {
       const prevToday = S.init && S.init.today;
       S.init = await call('getInitData');
-      renderStaff(false); renderBanners();
+      renderUser(); renderBanners();
+      if (me().sections.indexOf(S.section) < 0){ S.cart = []; S.reqId = null; setSection(me().sections[0], true); }
+      if (!canView(S.view)) showView(Object.keys(VIEWS).find(canView));
       if (S.f){
         if (S.f.to === prevToday) S.f.to = S.init.today;
         $$('#sumFilters input[type=date], #entFilters input[type=date]').forEach(i => { i.max = S.init.today; });
         syncFilters('');
       }
-      const jobs = [fetchStock()];
+      const jobs = canView('stock') ? [fetchStock()] : [];
       if (S.sum || S.view === 'sum' || S.view === 'ent') jobs.push(fetchSummary());
       await Promise.all(jobs);
     });
@@ -486,6 +497,7 @@ async function refreshAll(){
 
 /* ================= SECTION ================= */
 function setSection(sec, silent){
+  if (me().sections.indexOf(sec) < 0) return;
   if (sec === S.section && !silent) return;
   if (S.cart.length && !silent){
     confirmBox('Switch to ' + sec + '?', 'You have ' + S.cart.length + ' unsaved ' + S.section + ' ' + (S.cart.length === 1 ? 'entry' : 'entries') + ' in the list. Switching will remove them.', 'Clear and switch', () => {
@@ -558,14 +570,16 @@ function itemHtml(i){
     '</div>' + (on ? optsHtml(i) : '') + '</div>';
 }
 function toggleItem(id){
+  const types = me().types;
+  if (!types.length){ toast('You can only view the stock'); return; }
   if (S.open === id){ S.open = null; }
-  else { S.open = id; S.ed = { type: 'BREAKAGE', qty: 1, remark: '' }; }
+  else { S.open = id; S.ed = { type: types.indexOf('BREAKAGE') >= 0 ? 'BREAKAGE' : types[0], qty: 1, remark: '' }; }
   renderStock();
 }
 function optsHtml(i){
   const e = S.ed;
   return '<div class="item-opts">' +
-    '<div class="types">' + Object.keys(TYPES).map(t => '<button type="button" class="type' + (e.type === t ? ' on' : '') + '" style="--c:' + TYPES[t].c + '" data-t="' + t + '">' +
+    '<div class="types">' + me().types.map(t => '<button type="button" class="type' + (e.type === t ? ' on' : '') + '" style="--c:' + TYPES[t].c + '" data-t="' + t + '">' +
       '<span>' + TYPES[t].label + '</span><small>' + TYPES[t].hint + '</small></button>').join('') + '</div>' +
     '<div class="opt-grid">' +
       '<label><span id="qLab">' + 'Quantity' + '</span><div class="stepper"><button type="button" id="qMinus" aria-label="Decrease">−</button>' +
@@ -626,15 +640,12 @@ function openCart(err){
   if (!S.cart.length) return;
   const pv = previewCart(), anyErr = pv.some(p => p.error);
   modal('<h2>Check before saving</h2>' +
-    '<p class="muted">' + esc(S.section) + ' section, ' + fmtDate(S.init.today) + (S.staff ? ', entry by <b>' + esc(S.staff) + '</b>' : '') + '</p>' +
+    '<p class="muted">' + esc(S.section) + ' section, ' + fmtDate(S.init.today) + ', entry by <b>' + esc(S.staff) + '</b></p>' +
     pv.map(p => '<div class="line"><div><div class="t1">' + esc(p.line.name) + '</div>' +
       '<div class="t2 num">' + typeTag(p.line.type, p.line.qty) + ' &nbsp;Stock ' + p.before + ' → <b>' + p.after + '</b>' +
       (p.line.remark ? ', ' + esc(p.line.remark) : '') + '</div>' +
       (p.error ? '<div class="err">' + esc(p.error) + '</div>' : '') + '</div>' +
       '<button type="button" class="btn ghost sm rm" data-key="' + p.line.key + '">Remove</button></div>').join('') +
-    '<div class="fgrid">' +
-      (S.staff ? '' : '<label class="full">Who is making this entry? *<select id="cBy"><option value="">Select</option>' + (S.init.staff || []).map(n => '<option>' + esc(n) + '</option>').join('') + '</select></label>') +
-    '</div>' +
     '<div class="err" id="cErr">' + esc(err || '') + '</div>' +
     '<div class="row end"><button class="btn ghost" id="cClose">Back</button><button class="btn go big" id="cSave"' + (anyErr ? ' disabled' : '') + '>Save ' + S.cart.length + (S.cart.length === 1 ? ' entry' : ' entries') + '</button></div>');
   $$('#modalBody .rm').forEach(b => b.onclick = () => {
@@ -647,14 +658,9 @@ function openCart(err){
 }
 async function saveCart(){
   if (S.busy) return;
-  const bySel = $('#cBy');
-  if (bySel){
-    if (!bySel.value){ $('#cErr').textContent = 'Select your name.'; return; }
-    S.staff = bySel.value; $('#staffSel').value = S.staff; store('foh_staff', S.staff); markStaff();
-  }
   if (!S.reqId) S.reqId = uuid();
   const n = S.cart.length;
-  const payload = { requestId: S.reqId, section: S.section, enteredBy: S.staff,
+  const payload = { requestId: S.reqId, section: S.section,
                     lines: S.cart.map(l => ({ itemId: l.itemId, type: l.type, qty: l.qty, remark: l.remark })) };
   busy($('#cSave'), true); S.busy = true; S.modalLock = true; $('#cErr').textContent = '';
   const t0 = performance.now();
@@ -680,7 +686,7 @@ function renderFilters(){
     '<label>From<input type="date" id="' + id + 'From" value="' + esc(S.f.from) + '" max="' + esc(S.init.today) + '"></label>' +
     '<label>To<input type="date" id="' + id + 'To" value="' + esc(S.f.to) + '" max="' + esc(S.init.today) + '"></label>' +
     '<div><span class="small muted" style="font-weight:700;display:block;margin-bottom:5px">Section</span><div class="seg sm" data-f="' + id + '">' +
-      ['All', 'Cafe', 'Barista'].map(s => '<button type="button" data-s="' + s + '" class="' + (S.f.sec === s ? 'on' : '') + '">' + s + '</button>').join('') + '</div></div>' +
+      (me().sections.length > 1 ? ['All'].concat(me().sections) : me().sections).map(s => '<button type="button" data-s="' + s + '" class="' + (S.f.sec === s ? 'on' : '') + '">' + s + '</button>').join('') + '</div></div>' +
     '<div class="spacer"></div><button class="btn primary" data-go="' + id + '">Show</button>';
   $('#sumFilters').innerHTML = html('sf');
   $('#entFilters').innerHTML = html('ef');
@@ -715,27 +721,28 @@ function renderSummary(){
   const s = S.sum; if (!s) return;
   const t = s.totals;
   const k = (n, l, col) => '<div class="kpi"><b class="num"' + (col ? ' style="color:' + col + '"' : '') + '>' + n + '</b><span>' + l + '</span></div>';
+  const lossLabel = t.missing ? 'Breakage &amp; missing' : 'Breakage';   // Missing = old entries only
   // breakage + missing by category
   const byCat = {};
   s.rows.forEach(r => { const o = r.breakage + r.missing; if (o) byCat[r.category] = (byCat[r.category] || 0) + o; });
   const cats = Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]);
   const max = cats.length ? Math.max.apply(null, cats.map(c => byCat[c])) : 0;
   const bars = cats.length ? '<div class="bars">' + cats.map(c => '<div class="bar"><span>' + esc(c) + '</span><div class="track"><div class="fill" style="width:' + Math.round(byCat[c] / max * 100) + '%"></div></div><b class="num">' + byCat[c] + '</b></div>').join('') + '</div>'
-    : '<div class="empty">Nothing was broken or lost in this range 🎉</div>';
+    : '<div class="empty">Nothing was broken in this range 🎉</div>';
   // most affected items
   const top = s.rows.filter(r => r.breakage + r.missing > 0).sort((a, b) => (b.breakage + b.missing) - (a.breakage + a.missing)).slice(0, 6);
   const cards = top.length ? '<div class="band-grid">' + top.map(r => {
     const out = r.breakage + r.missing, base = r.opening + r.added, pct = base ? Math.min(100, Math.round(out / base * 100)) : 0;
     return '<div class="band-card"><div class="bc-top">' + esc(r.name) + '<small>' + esc(r.category) + (s.section === 'All' ? ', ' + esc(r.section) : '') + '</small></div>' +
       '<div class="bc-num"><b>' + out + '</b><span>lost, out of ' + base + '</span></div><div class="bc-bar"><i style="width:' + pct + '%"></i></div>' +
-      '<div class="small muted" style="font-weight:700;margin-top:6px">Breakage ' + r.breakage + ', Missing ' + r.missing + ', now ' + r.closing + '</div></div>';
-  }).join('') + '</div>' : '<div class="empty">No breakage or missing items</div>';
+      '<div class="small muted" style="font-weight:700;margin-top:6px">Breakage ' + r.breakage + (r.missing ? ', Missing ' + r.missing : '') + ', now ' + r.closing + '</div></div>';
+  }).join('') + '</div>' : '<div class="empty">No breakage</div>';
 
   $('#sumOut').innerHTML =
     '<p class="muted small" style="margin:0 0 10px 4px">' + fmtDate(s.from) + ' to ' + fmtDate(s.to) + ', ' + (s.section === 'All' ? 'Cafe + Barista' : esc(s.section)) + '</p>' +
     '<div class="kpis">' + k(t.opening, 'Opening') + k(t.added, 'Added', 'var(--grass)') + k(t.breakage, 'Breakage', 'var(--red)') +
-      k(t.missing, 'Missing', 'var(--amber)') + (t.adjust ? k(sgn(t.adjust), 'Adjust') : '') + k(t.closing, 'Closing') + '</div>' +
-    '<div class="two"><div class="card"><h3>Breakage &amp; missing by category</h3>' + bars + '</div>' +
+      (t.missing ? k(t.missing, 'Missing', 'var(--amber)') : '') + (t.adjust ? k(sgn(t.adjust), 'Adjust') : '') + k(t.closing, 'Closing') + '</div>' +
+    '<div class="two"><div class="card"><h3>' + lossLabel + ' by category</h3>' + bars + '</div>' +
       '<div class="card"><h3>Most affected items</h3>' + cards + '</div></div>' +
     '<div class="card"><div class="sec-head"><h3>Item-wise</h3><div class="row">' +
       '<label class="check"><input type="checkbox" id="onlyMoved"' + (S.onlyMoved ? ' checked' : '') + '> Only items with activity</label>' +
@@ -750,14 +757,15 @@ function renderSumTable(){
   const rows = s.rows.filter(r => (!S.onlyMoved || r.added || r.breakage || r.missing || r.adjust) && (!q || r.name.toLowerCase().includes(q)));
   if (!rows.length){ el.innerHTML = '<div class="empty">No items to show</div>'; return; }
   const adj = s.rows.some(r => r.adjust);          // old Adjust entries (if any) stay visible so the numbers add up
+  const mis = s.rows.some(r => r.missing);         // same for old Missing entries
   const sum = rows.reduce((a, r) => { ['opening', 'added', 'breakage', 'missing', 'adjust', 'closing'].forEach(k => a[k] += r[k]); return a; },
     { opening: 0, added: 0, breakage: 0, missing: 0, adjust: 0, closing: 0 });
   el.innerHTML = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th>Category</th>' + (s.section === 'All' ? '<th>Section</th>' : '') +
-    '<th class="n">Opening</th><th class="n">Added</th><th class="n">Breakage</th><th class="n">Missing</th>' + (adj ? '<th class="n">Adjust</th>' : '') + '<th class="n">Closing</th></tr></thead><tbody>' +
+    '<th class="n">Opening</th><th class="n">Added</th><th class="n">Breakage</th>' + (mis ? '<th class="n">Missing</th>' : '') + (adj ? '<th class="n">Adjust</th>' : '') + '<th class="n">Closing</th></tr></thead><tbody>' +
     rows.map(r => '<tr><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.category) + '</td>' + (s.section === 'All' ? '<td>' + esc(r.section) + '</td>' : '') +
       '<td class="n">' + r.opening + '</td><td class="n' + (r.added ? ' a' : '') + '">' + r.added + '</td><td class="n' + (r.breakage ? ' b' : '') + '">' + r.breakage + '</td>' +
-      '<td class="n' + (r.missing ? ' b' : '') + '">' + r.missing + '</td>' + (adj ? '<td class="n">' + sgn(r.adjust) + '</td>' : '') + '<td class="n"><b>' + r.closing + '</b></td></tr>').join('') +
-    '<tr class="total"><td>Total</td><td></td>' + (s.section === 'All' ? '<td></td>' : '') + ['opening', 'added', 'breakage', 'missing'].map(k => '<td class="n">' + sum[k] + '</td>').join('') +
+      (mis ? '<td class="n' + (r.missing ? ' b' : '') + '">' + r.missing + '</td>' : '') + (adj ? '<td class="n">' + sgn(r.adjust) + '</td>' : '') + '<td class="n"><b>' + r.closing + '</b></td></tr>').join('') +
+    '<tr class="total"><td>Total</td><td></td>' + (s.section === 'All' ? '<td></td>' : '') + ['opening', 'added', 'breakage'].concat(mis ? ['missing'] : []).map(k => '<td class="n">' + sum[k] + '</td>').join('') +
     (adj ? '<td class="n">' + sgn(sum.adjust) + '</td>' : '') + '<td class="n">' + sum.closing + '</td></tr></tbody></table></div>';
 }
 function renderEntries(){
@@ -765,7 +773,7 @@ function renderEntries(){
   const active = s.entries.filter(e => e.status === 'ACTIVE');
   const cnt = t => active.filter(e => e.type === t).length;
   $('#entOut').innerHTML =
-    '<div class="kpis">' + Object.keys(TYPES).map(t => '<div class="kpi"><b class="num" style="color:' + TYPES[t].c + '">' + cnt(t) + '</b><span>' + TYPES[t].label + ' entries</span></div>').join('') +
+    '<div class="kpis">' + Object.keys(TYPES).filter(t => t !== 'MISSING' || cnt(t)).map(t => '<div class="kpi"><b class="num" style="color:' + TYPES[t].c + '">' + cnt(t) + '</b><span>' + TYPES[t].label + ' entries</span></div>').join('') +
       '<div class="kpi"><b class="num">' + (s.entries.length - active.length) + '</b><span>Voided</span></div></div>' +
     '<div class="card"><div class="sec-head"><h3>Entries (' + s.entriesTotal + ')</h3><input id="entQ" placeholder="Item, name or Txn ID" style="max-width:260px" value="' + esc(S.entQ) + '"></div><div id="entTable"></div>' +
     (s.entriesTotal > s.entries.length ? '<p class="muted small">Only the latest ' + s.entries.length + ' entries are shown. Narrow the date range.</p>' : '') + '</div>';
@@ -779,7 +787,7 @@ function renderEntTable(){
   el.innerHTML = list.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Time</th><th>Item</th><th>Section</th><th>Type</th><th class="n">Qty</th><th>By</th><th>Remark</th><th>Txn</th><th></th></tr></thead><tbody>' +
     list.map(e => '<tr class="' + (e.status === 'VOID' ? 'void' : '') + '"><td>' + fmtDate(e.date) + '</td><td class="num">' + esc(e.time) + '</td><td><b>' + esc(e.itemName) + '</b></td><td>' + esc(e.section) + '</td>' +
       '<td>' + typeTag(e.type) + '</td><td class="n"><b>' + sgn(e.signed) + '</b></td><td>' + esc(e.by) + '</td><td>' + esc(e.remark) + (e.status === 'VOID' ? '<br><span class="pill bad">VOID: ' + esc(e.voidReason) + '</span>' : '') + '</td>' +
-      '<td class="small muted">' + esc(e.txnId) + '</td><td>' + (e.status === 'ACTIVE' ? '<button class="btn danger sm" data-void="' + esc(e.txnId) + '">Void</button>' : '') + '</td></tr>').join('') +
+      '<td class="small muted">' + esc(e.txnId) + '</td><td>' + (e.status === 'ACTIVE' && me().canVoid ? '<button class="btn danger sm" data-void="' + esc(e.txnId) + '">Void</button>' : '') + '</td></tr>').join('') +
     '</tbody></table></div>' : '<div class="empty">No entries</div>';
   $$('#entTable [data-void]').forEach(b => b.onclick = () => openVoid(b.dataset.void));
 }
@@ -788,23 +796,20 @@ function openVoid(txnId){
   modal('<h2>Void this entry</h2>' +
     '<p class="muted">' + esc(e.itemName) + ', ' + typeTag(e.type, sgn(e.signed)) + ', ' + fmtDate(e.date) + ' ' + esc(e.time) + ' (' + esc(txnId) + ')</p>' +
     '<p class="muted small">Voiding removes this entry from the stock calculation. The record stays in the sheet.</p>' +
-    '<div class="fgrid"><label class="full">Reason *<input id="vReason" maxlength="300" placeholder="e.g. wrong item selected" autofocus></label>' +
-    '<label>Who is voiding this? *<select id="vBy"><option value="">Select</option>' + (S.init.staff || []).map(n => '<option' + (n === S.staff ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select></label>' +
-    '<label>Manager PIN *<input id="vPin" type="password" inputmode="numeric" autocomplete="off"></label></div>' +
+    '<div class="fgrid"><label class="full">Reason *<input id="vReason" maxlength="300" placeholder="e.g. wrong item selected" autofocus></label></div>' +
+    '<p class="muted small">Voided by <b>' + esc(S.staff) + '</b></p>' +
     '<div class="err" id="vErr"></div>' +
     '<div class="row end"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="vGo">Void</button></div>');
   $('#vGo').onclick = async () => {
     if (S.busy) return;
-    const reason = $('#vReason').value.trim(), by = $('#vBy').value, pin = $('#vPin').value.trim();
+    const reason = $('#vReason').value.trim();
     if (reason.length < 3){ $('#vErr').textContent = 'Enter a reason.'; return; }
-    if (!by){ $('#vErr').textContent = 'Select a name.'; return; }
-    if (!pin){ $('#vErr').textContent = 'Enter the PIN.'; return; }
     busy($('#vGo'), true, 'Voiding…'); S.busy = true; S.modalLock = true;
     try {
-      await call('voidEntry', { txnId, reason, enteredBy: by, pin });
+      await call('voidEntry', { txnId, reason });
       S.busy = false; S.modalLock = false; closeModal();
       toast(txnId + ' voided', 'ok');
-      loadSummary(); loadStock(true);
+      loadSummary(); if (canView('stock')) loadStock(true);
     } catch (err) {
       S.busy = false; S.modalLock = false; busy($('#vGo'), false); $('#vErr').textContent = errMsg(err);
     }

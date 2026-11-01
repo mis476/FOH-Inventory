@@ -67,6 +67,21 @@ Pehli baar deployment ID `clasp deployments` se dhoondh ke `.deployment-id` mein
 | `npm run push` | Check + `clasp push` (sirf HEAD / test deployment update hota hai) |
 | `npm run live` | Pull + check + push + deploy (staff link pe naya version) |
 
+## Kaun kya kar sakta hai: `ACCESS` sheet
+
+| Column | Kya likhna hai |
+|-|-|
+| Name / Email | Employee_Master wali email |
+| Active | `N` = app band |
+| Section | `Cafe`, `Barista` ya `Both` |
+| Stock / Summary / Entries Tab | `Y` = tab dikhega |
+| Add / Breakage | `Y` = ye entry kar sakta hai |
+| Void | `Y` = galat entry void kar sakta hai |
+| Personal Link | Gmail walon ka link (menu **FOH Stock → Make personal links**) |
+
+- @whimsilandindia.com wale: normal app link kholo, email apne aap pehchan liya jata hai.
+- Gmail wale: sirf apna personal link kholein. Link badalna ho to uska Personal Link cell khali karke menu dobara chalao.
+
 **Dhyan rahe:** ab Apps Script editor mein seedha edit mat karna. Kiya ho to pehle `npm run pull`
 karke commit aur push karo, warna agla `npm run live` us change ko overwrite kar dega.
 
